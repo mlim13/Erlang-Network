@@ -1,6 +1,6 @@
 -module(control).
 -export([graphToNetwork/1, extendNetwork/4]).
--export([messageTest/0, controlTest/0]).
+-export([messageTest/0, controlTest/0, extendTest/0]).
 
 % graphToNetwork recurses over Graph data structure.
 % Example Graph:
@@ -14,6 +14,15 @@
 %   ]
 
 %  [{red, [{white, [white, green]},{blue , [blue]}]},{white, [{red, [blue]},{blue, [green, red]}]},{blue , [{green, [white, green, red]}]},{green, [{red, [red, blue, white]}]}]
+
+extendTest() ->
+    RootPid = graphToNetwork([{red, [{white, [white, green]},{blue , [blue]}]},{white, [{red, [blue]},{blue, [green, red]}]},{blue , [{green, [white, green, red]}]},{green, [{red, [red, blue, white]}]}]),
+    
+    [WhiteTup] = ets:lookup(nameToPid, white),
+    {_, WhitePid} = WhiteTup,
+    Edges = [{WhitePid, [white, blue, green, red]}],
+    extendNetwork (RootPid, 1, green, {yellow, Edges}),
+    ets:delete(nameToPid).
 
 messageTest() ->
     RootPid = graphToNetwork([{red, [{white, [white, green]},{blue , [blue]}]},{white, [{red, [blue]},{blue, [green, red]}]},{blue , [{green, [white, green, red]}]},{green, [{red, [red, blue, white]}]}]),
@@ -76,14 +85,21 @@ controlTest() ->
 graphToNetwork(Graph) ->
     % Create table for associating pids with node names 
     ets:new(nameToPid, [named_table]),
-    Pid = extractRow(Graph), % start by recursively extracting each "row"
+    Pid = extractRow(Graph, Graph), % start by recursively extracting each "row"
     %ets:delete(nameToPid), % explicitly delete since sometimes named table persists after process terminates leading to an exception on next run
     io:format("graphToNetwork done~n"),
     Pid.
 
 extendNetwork(RootPid, SeqNum, From, {NodeName, Edges}) ->
     % Extract the information that will become the routing table for NodeName
-    Entry = extractEdgePid(Edges, []),
+    TempEntry = extractEdgePid(Edges, []),
+
+    % Add noInEdges info to entry. It will always be 1 for a newly created process
+    Entry = TempEntry ++ [{'$NoInEdges', 1}],
+
+    % We want a list of all the pids in Edges so we can update noInEdges for all processes correctly
+    PidList = extractPid(Edges, []),
+
     % Now, we send RootPid the control message with an appropriate ControlFun
     % Like all non-0 control messages, this will be propagated to every node
     % ControlFun will do all the heavy lifting for the logic required by extendNetwork
@@ -99,13 +115,21 @@ extendNetwork(RootPid, SeqNum, From, {NodeName, Edges}) ->
                     % Add new process to From's routing table
                     ets:insert(Table, {NodeName, Pid}),
                     Return = [Pid];
-                true ->
+                _ ->
                     % Directions to get to the new node is the same as the direction to get to From
                     % Therefore, lookup the which pid leads us to From and use that
                     [FromTup] = ets:lookup(Table, From),
                     {_, FromPid} = FromTup,
                     ets:insert(Table, {NodeName, FromPid}),
                     Return = []
+            end,
+            % update noInEdges
+            case lists:member(self(), PidList) of
+                true ->
+                    [{_, Num}] = ets:lookup(Table, '$NoInEdges'),
+                    ets:insert(Table, {'$NoInEdges', Num + 1});
+                false ->
+                    true
             end,
             Return
         end},
@@ -122,29 +146,35 @@ extendNetwork(RootPid, SeqNum, From, {NodeName, Edges}) ->
     end,
     Return.
 
-extractRow([H|T]) ->
+% extractRow accepts the Graph argument so it can count noInEdges for each node
+extractRow([H|T], Graph) ->
     % H is a tuple of form (for example): {red  , [{white, [white, blue]}]}
     % NodeName is the router process/node that this particular row is representing
     % Edges is a list that captures all the information about that node. It must be recursively parsed
     {NodeName, Edges} = H,
-    
+
+    % Count inEdges
+    Count = countInEdges(NodeName, Graph, 0),
+
     % Once we have extracted the NodeName, start that router process
     Pid = router:start(NodeName),
     ets:insert(nameToPid, {NodeName, Pid}),
 
     % Recurse first so we can get all the pids associated with their node names
     % Once we have this information, we can proceed to fill out routing tables
-    extractRow(T),
+    extractRow(T, Graph),
 
     % Recursively extract the information from the "row"
     Entry = extractEdge(Edges, []),
-    %io:format("Entry is ~w~n",[Entry]);
+
+    % Append noInEdges information to Entry
+    EntryWithCount = Entry ++ [{'$NoInEdges', Count}],
 
     % send the initial control message which sets up the routing table
-    sendInitialControlMessage(Pid, Entry),
+    sendInitialControlMessage(Pid, EntryWithCount),
     receiveAck(), % wait for response to ensure our network is correctly set up
     Pid; % return pid of first node
-extractRow([]) ->
+extractRow([], Graph) ->
     true. % recursion finished
 
 extractEdge([H|T], Entry) ->
@@ -203,3 +233,38 @@ receiveAck() ->
         5000 -> % if a process takes more than 5 seconds to respond, we assume failure
             io:format("Initialisation (SeqNum 0) timed out~n")
     end.
+
+countInEdges(NodeName, [H|T], Count) ->
+    % H is of form {red, [{white, [white, green]},{blue , [blue]}]}
+    {_, List} = H,
+    % List is of form [{white, [white, green]},{blue , [blue]}]
+    NewCount = subcountInEdges(NodeName, List, 0),
+    if
+        NewCount > 0 ->
+            Ret = countInEdges(NodeName, T, Count + 1);
+        true ->
+            Ret = countInEdges(NodeName, T, Count)
+    end,
+    Ret;
+countInEdges(NodeName, [], Count) ->
+    Count.
+
+subcountInEdges(NodeName, [H|T], Count) ->
+    % H is of form {white, [white, green]}
+    {SearchName, _} = H,
+    if
+        SearchName == NodeName ->
+            NewCount = subcountInEdges(NodeName, T, Count + 1);
+        true ->
+            NewCount = subcountInEdges(NodeName, T, Count)
+    end,
+    NewCount;
+subcountInEdges(NodeName, [], Count) ->
+    Count.
+
+extractPid([H|T], List) ->
+    {Pid, _} = H,
+    NewList = List ++ [Pid],
+    extractPid(T, NewList);
+extractPid([], List) ->
+    List.

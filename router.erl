@@ -51,18 +51,29 @@ readyReceive(RouterName, RoutingTable, Prev, LastSeqNum) ->
             
             OldTable = ets:tab2list(RoutingTable), % store the old routing table, prior to making changes
             Children = ControlFun(RouterName, RoutingTable), % call ControlFun which makes changes to routing table and might spawn Children
-            NumNeighbours = sendControlToNeighbours(OldTable, Pid, SeqNum, ControlFun, 0), % propagate control message to all neighbours
             if
                 % if root process
                 From == Pid ->
                     % enter a receive loop specific to the root node
                     % waits for votes from all other nodes etc
-                    rootTwoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children, NumNeighbours, NumNeighbours);
+                    if
+                        Children == abort ->
+                            From ! {abort, self(), SeqNum};
+                        true ->
+                            NumNeighbours = sendControlToNeighbours(OldTable, Pid, SeqNum, ControlFun, 0), % propagate control message to all neighbours
+                            rootTwoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children, NumNeighbours, NumNeighbours)
+                    end;
                 % else
                 true ->
-                    From ! {yes, self(), SeqNum}, % reply with vote of yes
-                    % enter a receive loop waiting to be told whether to doCommit or doAbort
-                    twoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children)
+                    if
+                        Children == abort ->
+                            From ! {no, self(), SeqNum};
+                        true ->
+                            NumNeighbours = sendControlToNeighbours(OldTable, Pid, SeqNum, ControlFun, 0), % propagate control message to all neighbours
+                            From ! {yes, self(), SeqNum}, % reply with vote of yes
+                            % enter a receive loop waiting to be told whether to doCommit or doAbort
+                            twoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children)
+                    end
             end;
         {dump, From} ->
             From ! {table, self (), ets:match (RoutingTable, '$1')},
@@ -250,16 +261,28 @@ rootTwoPCCommitted(RouterName, RoutingTable, From, SeqNum, CommittedCount) ->
 
 
 sendControlToNeighbours([H|T], Pid, SeqNum, ControlFun, NumNeighbours) ->
-    {_, Dest} = H,
-    Dest ! {control, self(), Pid, SeqNum, ControlFun},
-    sendControlToNeighbours(T, Pid, SeqNum, ControlFun, NumNeighbours + 1);
+    {Key, Dest} = H,
+    if
+        % Skip this entry in routing table
+        Key == '$NoInEdges' ->
+            sendControlToNeighbours(T, Pid, SeqNum, ControlFun, NumNeighbours);
+        true ->
+            Dest ! {control, self(), Pid, SeqNum, ControlFun},
+            sendControlToNeighbours(T, Pid, SeqNum, ControlFun, NumNeighbours + 1)
+    end;
 sendControlToNeighbours([], Pid, SeqNum, ControlFun, NumNeighbours) ->
     NumNeighbours.
 
 sendToNeighbours([H|T], Message, SeqNum, NumNeighbours) ->
-    {_, Dest} = H,
-    Dest ! {Message, self(), SeqNum},
-    sendToNeighbours(T, Message, SeqNum, NumNeighbours + 1);
+    {Key, Dest} = H,
+    if
+        % Skip this entry in routing table
+        Key == '$NoInEdges' ->
+            sendToNeighbours(T, Message, SeqNum, NumNeighbours);
+        true ->
+            Dest ! {Message, self(), SeqNum},
+            sendToNeighbours(T, Message, SeqNum, NumNeighbours + 1)
+    end;
 sendToNeighbours([], Message, SeqNum, NumNeighbours) ->
     NumNeighbours.
 
