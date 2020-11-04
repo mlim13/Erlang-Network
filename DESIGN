@@ -1,4 +1,92 @@
-Provide an exact description of the algorithm and protocol (including the format of the various messages and their semantics) used to implement two-phase commit.
-Provide an exact description of any extra messages you've introduced.
-Provide a description of how you implement the required functions (graphToNetwork and extendNetwork).
-Describe how you handle fault cases and conflicting control requests.
+Messages
+%%%%%%%%%%%%%%%%
+{control, From, Pid, SeqNum, ControlFun}
+This is the message used to initiate and propagate the request for a control action
+
+{message, Dest, From, Pid, Trace}
+This is the message used to forward a message to a particular destination
+
+{yes, From, SeqNum}
+This is a message used during the voting phase of 2pc
+It represents a node saying that it can commit
+
+{no, From, SeqNum}
+This is a message used during the voting phase of 2pc
+It represents a node saying that it cannot commit
+
+{doCommit, From, SeqNum}
+This is a message used during the second phase of 2pc which tells nodes to commit
+
+{doAbort, From, SeqNum}
+This is a message used during the second phase of 2pc which tells nodes to abort
+
+{committed, From, SeqNum}
+This is the final acknowledgement from nodes telling the root process that they have committed
+Root process will also use this message to send to the controller if a 2pc was successfully committed
+
+{abort, From, SeqNum}
+This is the final acknowledgement from nodes telling the root process that they aborted
+Root process will also use this message to send to the controller if a 2pc was aborted
+
+
+How 2pc works
+%%%%%%%%%%%%%%
+At the core of the 2pc implementation is the idea of “states”. States are represented by different functions which serve as receive loops, with the varying functions (reflecting varying states), having different behaviour when messages are received. The following states are defined
+
+readyReceive
+This represents the state of a process when outside of a 2pc. It is ready to accept any messages that come in and deal with them, particularly message and commit messages 
+
+twoPCReceive
+Once a non-root process has voted, it enters this state. Here, it waits for a doCommit or doAbort
+
+rootTwoPCReceive
+Once a root process has propagated the control message to all its n neighbours it enters this state. Here, it waits for the receipt of votes. If it receives n yes votes, it sends out a doCommit to all its neighbours and proceeds to the rootTwoPCCommitted state. If it receives a no vote, it sends out a doAbort to all its neighbours and proceeds to rootTwoPCCommitted
+
+rootTwoPCCommitted
+In this state, the root process simply waits to final acknowledgements (committed or abort messages)
+Once it receives these acknowledgements it sends this message on to the controller
+
+The algorithm
+Controller send a control message to some node (the root node)
+The root node (which is currently in the readyReceive), receives the message. If it is able to do the proposed ControlFun, it does so and then propagates the control message to all its neighbours. If not, it simply replies with abort to the controller. The root node then transitions to rootTwoPCReceive.
+At another (non-root) node (let’s call it A), the control message is received. It attempts to do the proposed ControlFun. If successful, it replies with yes to the node that sent it the control message. Otherwise, it replies with no. The node then propagates the control message to all its neighbours and enters twoPCReceive, storing the pid that sent the control message (let’s call it From).
+At another (non-root) node (let’s call it B), a control message is received and the same thing happens. It’s reply (yes or no) gets sent to A. A then has to forward this message onto the node that sent it (A) the control message (ie. the root node). Thus when A enters twoPCReceive, it uses its stored From pid to forward it along. This mechanism is used by twoPCReceive to always forward along yes/no messages such that they eventually reach the root node.
+As control messages are being propagated, they will invariably reach nodes that have already received a control message of the same sequence number and entered twoPCReceive. We do not reply yes/no in this case (such that we do not double up of yes messages). Instead, we simply ignore these messages.
+Once the root process receives n-1 yes votes (where n is the number nodes in the network neighbours [it can determine this from its routing table]), it sends doCommit messages to its neighbours and enters rootTwoPCCommitted
+Nodes in the twoPCReceive state receive these messages and propagate them onward, replying with committed. This follows the same mechanics as phase one (doCommit replaces control, and committed replaces yes). Nodes in twoPCReceive then return to readyReceive. If a node in readyReceive receives a committed message, it forwards it on.
+Once rootTwoPCCommitted receives n-1 committed messages, it tells the controller that the 2pc has been committed
+
+
+graphToNetwork(Graph)
+%%%%%%%%%%%%%%%%%%%%%
+graphToNetwork extracts information from the argument Graph by recursively parsing this data structure
+We deal with each node one by one
+For each node, we start the router process such that we obtain its pid. We then keep a temporary ets structure nameToPid to build the routing tables
+Then, for each node we extract information from the Edges data structure recursively
+Once we are at the deepest layer of recursion, we have access to the edge labels. We can then associate these with the edge endpoint it is associated with. Thus, {blue , [red]} becomes the entry {red, bluePid} in our routing table
+The function countInEdges counts the number of in-edges for each node by recursively parsing the Graph
+Now, we have all the information for the node’s routing table. We send it a control message with sequence number 0 so it can set up its routing table.
+Once we have received a committed message from each router process, our network is properly established and we can proceed
+
+
+extendNetwork(RootPid, SeqNum, From, {NodeName, Edges})
+%%%%%%%%%%%%%%%%%%%%%
+First, we extract the routing table information in the same way that we did for graphToNetwork
+If the Edges data structure contains an endpoint Node, then Node has another in-edge. We store all such Nodes in a list called PidList
+We send RootPid a control message. This control message will be propagated to all other processes as usual. ControlFun(Name, Table) does most of the logic required
+If Name = From, we start the new process and initialise it the same way we did in graphToNetwork. We also add new routing information to its routing table
+If Name != From, we simply add the new routing information to the routing table
+If the node receiving the control message is in the PidList, we need to add 1 to its $noInEdges
+We then wait for a committed or abort message
+
+
+Conflicting control requests
+%%%%%%%%%%%%%%%%%%
+A conflicting control request can manifest in several ways
+A control message (SeqNum A) is sent to a process inside twoPCReceive of a different control request (SeqNum B)
+A control message (SeqNum A) is sent to a process inside a rootTwoPCReceive of a different control request (SeqNum B)
+A control message (SeqNum A) is sent to a process inside a rootTwoPCCommitted of a different control request (SeqNum B)
+In each of these cases, the states handle as follows
+Node replies with no if node is not the intended root of B
+Node replies with abort if node is the intended root of B
+Thus, depending on timing, either one or both of the conflicting control requests can abort (eg. if half the nodes are in twoPCReceive for A and half are in twoPCReceive for B, they may both abort when they try to get votes from the others)
