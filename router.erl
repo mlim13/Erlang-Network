@@ -40,7 +40,7 @@ readyReceive(RouterName, RoutingTable, Prev, LastSeqNum) ->
         {control, From, Pid, 0, ControlFun} ->
             Children = ControlFun(RouterName, RoutingTable),
             From ! {committed, self(), 0}, % send committed straight back to the controller
-            io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
+            %io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
             readyReceive(RouterName, RoutingTable, none, 0); % reenter receive loop
         % receive control message with the SAME seqnum as the previous
         % this shoud do nothing as the control message is merely a remnant of a previously completed 2pc
@@ -141,7 +141,7 @@ twoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children) ->
         {doCommit, From2, SeqNum} ->
             NumNeighbours = sendToNeighbours(OldTable, doCommit, SeqNum, 0), % propagate doCommit to all other nodes
             From2 ! {committed, self(), SeqNum}, % reply to the process that told us to commit, with committed
-            io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
+            %io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
             readyReceive(RouterName, RoutingTable, From2, SeqNum);
         % Receipt of a doAbort
         {doAbort, From2, SeqNum} ->
@@ -151,7 +151,7 @@ twoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children) ->
             ets:insert(RoutingTable, OldTable), % fill the routing table with its old values
             killChildren(Children), % kill children
             From2 ! {abort, self(), SeqNum}, % reply with abort
-            io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
+            %io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
             readyReceive(RouterName, RoutingTable, From2, SeqNum)
     after
         % If we wait more than 5 seconds, abort
@@ -192,7 +192,6 @@ rootTwoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children, Yes
                     rootTwoPCReceive(RouterName, RoutingTable, From, SeqNum, OldTable, Children, YesCount - 1, CommittedCount);
                 % if we receive a no, we know we will have to abort
                 {no, From2, SeqNum} ->
-                    io:format("~w in no~n",[self()]),
                     NumNeighbours = sendToNeighbours(OldTable, doAbort, SeqNum, 0), % propagate doAbort to all nodes
                     % ROLLBACK
                     ets:delete_all_objects(RoutingTable),
@@ -222,16 +221,15 @@ rootTwoPCCommitted(RouterName, RoutingTable, From, SeqNum, CommittedCount) ->
     if
         CommittedCount == 0 ->
             From ! {committed, self(), SeqNum},
-            io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
+            %io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
             readyReceive(RouterName, RoutingTable, none, SeqNum);
         true ->
             receive
                 {committed, From2, SeqNum} ->
                     rootTwoPCCommitted(RouterName, RoutingTable, From, SeqNum, CommittedCount - 1);
                 {abort, From2, SeqNum} ->
-                    io:format("~w in abort. From is ~w~n",[self(), From]),
                     From ! {abort, self(), SeqNum},
-                    io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
+                    %io:format("Routing table of ~w is ~w~n",[self(), ets:tab2list(RoutingTable)]),
                     readyReceive(RouterName, RoutingTable, none, SeqNum);
                 {control, From2, Pid, SeqNum2, ControlFun} ->
                     if 
