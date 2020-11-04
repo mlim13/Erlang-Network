@@ -1,0 +1,4 @@
+Provide an exact description of the algorithm and protocol (including the format of the various messages and their semantics) used to implement two-phase commit.
+Provide an exact description of any extra messages you've introduced.
+Provide a description of how you implement the required functions (graphToNetwork and extendNetwork).
+Describe how you handle fault cases and conflicting control requests.
